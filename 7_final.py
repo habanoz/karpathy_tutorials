@@ -210,8 +210,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 for step in range(max_iters):
     if step % eval_interval == 0:
         loss = estimate_loss()
-        print(f"Step {step}; Train loss: {
-              loss['train']:.4f}; Test loss {loss['test']:.4f}")
+        print(f"Step {step}; Train loss: {loss['train']:.4f}; Test loss {loss['test']:.4f}")
 
     xb, yb = get_batch('train')
 
