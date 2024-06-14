@@ -207,13 +207,38 @@ if __name__ == "__main__":
     num_return_sequences = 5
     max_length = 30
 
-    model = GPT.from_pretrained('gpt2')
-    model.eval()
-    model.to(device)
-
-    # prefix tokens
     import tiktoken
     enc = tiktoken.get_encoding('gpt2')
+
+    with open('input.txt') as f:
+        text = f.read()
+
+    text = text[:1000]
+    tokens = enc.encode(text)
+
+    B,T = 4, 32
+    buf = torch.tensor(tokens[:B*T+1]).to(device)
+
+    x = buf[:-1].view(B,T)
+    y = buf[1:].view(B,T)
+
+    #model = GPT.from_pretrained('gpt2')
+    model = GPT(GPTConfig())
+    model.to(device)
+    
+    
+    optimizer =  torch.optim.AdamW(model.parameters(), lr=3e-4)
+    for i in range(50):
+        optimizer.zero_grad()
+        logits, loss = model(x,y)
+        loss.backward()
+        optimizer.step()
+        print(f"Step {i}, loss: {loss.item()}")
+    
+    import sys; sys.exit()
+
+    # prefix tokens
+
     tokens = enc.encode("Hello, I'm a language model,")
     tokens = torch.tensor(tokens, dtype=torch.long)  # (8,)
     tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (5, 8)
