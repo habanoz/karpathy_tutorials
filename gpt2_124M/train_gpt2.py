@@ -2,49 +2,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
-
-@dataclass
-class GPTConfig:
-    block_size: int = 1024  # max sequence length
-    vocab_size: int = 50257  # 50K BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-
-
-class Block(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
-
-        # communication between tokens. aggregation pooling: reduce operation
-        self.attn = CausalSelfAttention(config)
-        self.mlp = MLP(config)  # feed forward network. map operation
-
-    def forward(self, x):
-        x = x + self.attn(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
-        return x
-
-
-class MLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
-
-        # tanh approximation version is specific to gpt2, approximation is not needed otherwise
-        self.gelu = nn.GELU(approximate='tanh')
-
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
-
-    def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        x = self.c_proj(x)
-        return x
+import math
 
 
 class CausalSelfAttention(nn.Module):
@@ -54,7 +12,7 @@ class CausalSelfAttention(nn.Module):
 
         # key, query, value  projections for all heads but in a batch
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
-        
+
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
 
@@ -88,6 +46,7 @@ class CausalSelfAttention(nn.Module):
 
         denominator = (1.0 / math.sqrt(k.size(-1)))
         att = (q @ k.transpose(-2, -1)) * denominator  # (B, nh, T, T)
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
         att = F.softmax(att, dim=-1)  # (B, nh, T, hs)
 
         y = att @ v  # (B, nh, T, hs)
@@ -97,6 +56,49 @@ class CausalSelfAttention(nn.Module):
         y = self.c_proj(y)
 
         return y
+
+
+class MLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+
+        # tanh approximation version is specific to gpt2, approximation is not needed otherwise
+        self.gelu = nn.GELU(approximate='tanh')
+
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        return x
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+
+        # communication between tokens. aggregation pooling: reduce operation
+        self.attn = CausalSelfAttention(config)
+        self.mlp = MLP(config)  # feed forward network. map operation
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024  # max sequence length
+    vocab_size: int = 50257  # 50K BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
 
 
 class GPT(nn.Module):
@@ -112,6 +114,31 @@ class GPT(nn.Module):
         })
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+    def forward(self, idx, targets=None):
+        # idx is of shape (B, T)
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {
+            T}, block size is only {self.config.block_size}"
+        # forward the token and posisition embeddings
+        pos = torch.arange(0, T, dtype=torch.long,
+                           device=idx.device)  # shape (T)
+        # position embeddings of shape (T, n_embd)
+        pos_emb = self.transformer.wpe(pos)
+        # token embeddings of shape (B, T, n_embd)
+        tok_emb = self.transformer.wte(idx)
+        x = tok_emb + pos_emb
+        # forward the blocks of the transformer
+        for block in self.transformer.h:
+            x = block(x)
+        # forward the final layernorm and the classifier
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)  # (B, T, vocab_size)
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -174,5 +201,49 @@ class GPT(nn.Module):
         return model
 
 
-model = GPT.from_pretrained('gpt2')
-print("Ready")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+if __name__ == "__main__":
+    num_return_sequences = 5
+    max_length = 30
+
+    model = GPT.from_pretrained('gpt2')
+    model.eval()
+    model.to(device)
+
+    # prefix tokens
+    import tiktoken
+    enc = tiktoken.get_encoding('gpt2')
+    tokens = enc.encode("Hello, I'm a language model,")
+    tokens = torch.tensor(tokens, dtype=torch.long)  # (8,)
+    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (5, 8)
+    x = tokens.to(device)
+
+    # generate! right now x is (B, T) where B = 5, T = 8
+    # set the seed to 42
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    while x.size(1) < max_length:
+        # forward the model to get the logits
+        with torch.no_grad():
+            logits = model(x)[0]  # (B, T, vocab_size)
+            # take the logits at the last position
+            logits = logits[:, -1, :]  # (B, vocab_size)
+            # get the probabilities
+            probs = F.softmax(logits, dim=-1)
+            # do top-k sampling of 50 (huggingface pipeline default)
+            # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+            # select a token from the top-k probabilities
+            # note: multinomial does not demand the input to sum to 1
+            ix = torch.multinomial(topk_probs, 1)  # (B, 1)
+            # gather the corresponding indices
+            xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
+            # append to the sequence
+            x = torch.cat((x, xcol), dim=1)
+
+    # print the generated text
+    for i in range(num_return_sequences):
+        tokens = x[i, :max_length].tolist()
+        decoded = enc.decode(tokens)
+        print(">", decoded)
