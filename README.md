@@ -1,4 +1,4 @@
-# Implemenations for Lectures by Andrej Karpathy
+# Implementations for GPT Lectures by Andrej Karpathy
 
 ## Let's build GPT from scratch
 
