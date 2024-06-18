@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import math
-
+import tiktoken
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -220,26 +220,47 @@ class GPT(nn.Module):
         return model
 
 
+class LiteDataLoader:
+    def __init__(self, B, T) -> None:
+        self.B = B
+        self.T = T
+
+        with open("input.txt", "r") as f:
+            text = f.read()
+    
+        enc = tiktoken.get_encoding('gpt2')
+        self.tokens = enc.encode(text)
+
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
+
+        self.current_pos = 0
+    
+    def next_batch(self):
+        B, T = self.B, self.T
+        pos = self.current_pos
+        buf = torch.tensor(self.tokens[pos: pos + B*T+1])
+
+        x = buf[:-1].view(B, T)
+        y = buf[1:].view(B, T)
+
+        self.current_pos += B*T
+
+        # if data is used up
+        # revert to beginning
+        if self.current_pos+B*T+1 > len(self.tokens):
+            self.current_pos = 0
+
+        return x, y
+    
+    
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 if __name__ == "__main__":
     num_return_sequences = 5
     max_length = 30
 
-    import tiktoken
-    enc = tiktoken.get_encoding('gpt2')
-
-    with open('input.txt') as f:
-        text = f.read()
-
-    text = text[:1000]
-    tokens = enc.encode(text)
-
-    B,T = 4, 32
-    buf = torch.tensor(tokens[:B*T+1]).to(device)
-
-    x = buf[:-1].view(B,T)
-    y = buf[1:].view(B,T)
+    train_loader =  LiteDataLoader(B=4, T=32)
 
     #model = GPT.from_pretrained('gpt2')
     model = GPT(GPTConfig())
@@ -248,10 +269,15 @@ if __name__ == "__main__":
     
     optimizer =  torch.optim.AdamW(model.parameters(), lr=3e-4)
     for i in range(50):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        
         optimizer.zero_grad()
         logits, loss = model(x,y)
+
         loss.backward()
         optimizer.step()
+        
         print(f"Step {i}, loss: {loss.item()}")
     
     import sys; sys.exit()
