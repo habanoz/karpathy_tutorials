@@ -270,6 +270,7 @@ if __name__ == "__main__":
     #model = GPT.from_pretrained('gpt2')
     model = GPT(GPTConfig())
     model.to(device)
+    model = torch.compile(model)
     
     
     optimizer =  torch.optim.AdamW(model.parameters(), lr=3e-4)
