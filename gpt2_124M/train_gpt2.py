@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import math
 import tiktoken
+import time
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -137,8 +138,8 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         # idx is of shape (B, T)
         B, T = idx.size()
-        assert T <= self.config.block_size, f"Cannot forward sequence of length {
-            T}, block size is only {self.config.block_size}"
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        
         # forward the token and posisition embeddings
         pos = torch.arange(0, T, dtype=torch.long,
                            device=idx.device)  # shape (T)
@@ -203,8 +204,8 @@ class GPT(nn.Module):
                       'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
-        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {
-            len(sd_keys_hf)} != {len(sd_keys)}"
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
@@ -257,14 +258,14 @@ class LiteDataLoader:
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 if __name__ == "__main__":
-    num_return_sequences = 5
-    max_length = 30
 
     torch.manual_seed(1337)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(1337)
 
-    train_loader =  LiteDataLoader(B=4, T=32)
+    train_loader =  LiteDataLoader(B=2, T=1024)
+
+    torch.set_float32_matmul_precision('high')
 
     #model = GPT.from_pretrained('gpt2')
     model = GPT(GPTConfig())
@@ -273,51 +274,22 @@ if __name__ == "__main__":
     
     optimizer =  torch.optim.AdamW(model.parameters(), lr=3e-4)
     for i in range(50):
+        t0 = time.time()
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         
         optimizer.zero_grad()
+        
+
         logits, loss = model(x,y)
 
         loss.backward()
         optimizer.step()
 
-        print(f"Step {i}, loss: {loss.item()}")
+        torch.cuda.synchronize()
+        t1 = time.time()
+        dt = (t1-t0)*1000
+        tokens_per_sec = (train_loader.B * train_loader.T ) / (t1-t0)
+
+        print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
     
-    import sys; sys.exit()
-
-    # prefix tokens
-
-    tokens = enc.encode("Hello, I'm a language model,")
-    tokens = torch.tensor(tokens, dtype=torch.long)  # (8,)
-    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (5, 8)
-    x = tokens.to(device)
-
-    # generate! right now x is (B, T) where B = 5, T = 8
-    # set the seed to 42
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
-    while x.size(1) < max_length:
-        # forward the model to get the logits
-        with torch.no_grad():
-            logits = model(x)[0]  # (B, T, vocab_size)
-            # take the logits at the last position
-            logits = logits[:, -1, :]  # (B, vocab_size)
-            # get the probabilities
-            probs = F.softmax(logits, dim=-1)
-            # do top-k sampling of 50 (huggingface pipeline default)
-            # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-            # select a token from the top-k probabilities
-            # note: multinomial does not demand the input to sum to 1
-            ix = torch.multinomial(topk_probs, 1)  # (B, 1)
-            # gather the corresponding indices
-            xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
-            # append to the sequence
-            x = torch.cat((x, xcol), dim=1)
-
-    # print the generated text
-    for i in range(num_return_sequences):
-        tokens = x[i, :max_length].tolist()
-        decoded = enc.decode(tokens)
-        print(">", decoded)
