@@ -45,13 +45,16 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
         # attention (materializes the large (T,T) matrix for all the queries and keys)
+        # attention calculation
+        # denominator = (1.0 / math.sqrt(k.size(-1)))
+        # att = (q @ k.transpose(-2, -1)) * denominator  # (B, nh, T, T)
+        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        # att = F.softmax(att, dim=-1)  # (B, nh, T, hs)
+        # y = att @ v  # (B, nh, T, hs)
 
-        denominator = (1.0 / math.sqrt(k.size(-1)))
-        att = (q @ k.transpose(-2, -1)) * denominator  # (B, nh, T, T)
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)  # (B, nh, T, hs)
+        # flash attention
+        y = F.scaled_dot_product_attention(k,q,v, is_causal=True)
 
-        y = att @ v  # (B, nh, T, hs)
         # re-assemble all head outputs side by side
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         # output projection
