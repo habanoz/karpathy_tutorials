@@ -260,6 +260,10 @@ if __name__ == "__main__":
     num_return_sequences = 5
     max_length = 30
 
+    torch.manual_seed(1337)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(1337)
+
     train_loader =  LiteDataLoader(B=4, T=32)
 
     #model = GPT.from_pretrained('gpt2')
@@ -277,7 +281,7 @@ if __name__ == "__main__":
 
         loss.backward()
         optimizer.step()
-        
+
         print(f"Step {i}, loss: {loss.item()}")
     
     import sys; sys.exit()
